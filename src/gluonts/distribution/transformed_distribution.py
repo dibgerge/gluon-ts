@@ -77,7 +77,7 @@ class TransformedDistribution(Distribution):
                 self.base_distribution.batch_shape
                 + self.base_distribution.event_shape
             )
-            self._event_shape = shape[len(shape) - self.event_dim :]
+            self._event_shape = shape[len(shape) - self.event_dim:]
         assert isinstance(self._event_shape, tuple)
         return self._event_shape
 

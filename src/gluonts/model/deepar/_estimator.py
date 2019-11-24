@@ -13,7 +13,7 @@
 
 # Standard library imports
 import numpy as np
-from typing import List, Optional
+from typing import List, Optional, Any
 
 # Third-party imports
 from mxnet.gluon import HybridBlock
@@ -44,6 +44,7 @@ from gluonts.transform import (
     Transformation,
     VstackFeatures,
 )
+from gluonts.block.feature import FeatureEmbedder
 
 # Relative imports
 from ._network import DeepARPredictionNetwork, DeepARTrainingNetwork
@@ -134,6 +135,7 @@ class DeepAREstimator(GluonEstimator):
         time_features: Optional[List[TimeFeature]] = None,
         num_parallel_samples: int = 100,
         dtype: DType = np.float32,
+        embedder: Optional[Any] = None,
     ) -> None:
         super().__init__(trainer=trainer, dtype=dtype)
 
@@ -196,6 +198,7 @@ class DeepAREstimator(GluonEstimator):
         self.history_length = self.context_length + max(self.lags_seq)
 
         self.num_parallel_samples = num_parallel_samples
+        self.embedder = embedder
 
     def create_transformation(self) -> Transformation:
         remove_field_names = [FieldName.FEAT_DYNAMIC_CAT]
@@ -296,6 +299,7 @@ class DeepAREstimator(GluonEstimator):
             lags_seq=self.lags_seq,
             scaling=self.scaling,
             dtype=self.dtype,
+            embedder=self.embedder,
         )
 
     def create_predictor(
@@ -316,6 +320,7 @@ class DeepAREstimator(GluonEstimator):
             lags_seq=self.lags_seq,
             scaling=self.scaling,
             dtype=self.dtype,
+            embedder=self.embedder,
         )
 
         copy_parameters(trained_network, prediction_network)

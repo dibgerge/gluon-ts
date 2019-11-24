@@ -28,39 +28,41 @@ import numpy as np
 # First-party imports
 from gluonts.core.component import get_mxnet_context, validated
 from gluonts.core.exception import GluonTSDataError
-from gluonts.dataset.loader import TrainDataLoader, InferenceDataLoader
+from gluonts.dataset.loader import TrainDataLoader, InferenceDataLoader, BatchBuffer
 from gluonts.support.util import HybridContext
-from gluonts.gluonts_tqdm import tqdm
 
 # Relative imports
 from . import learning_rate_scheduler as lrs
 from . import callbacks as cb
+from .callbacks import Callback
 
-logger = logging.getLogger("trainer")
+# logger = logging.getLogger("trainer")
 
-MODEL_ARTIFACT_FILE_NAME = "model"
-STATE_ARTIFACT_FILE_NAME = "state"
+# MODEL_ARTIFACT_FILE_NAME = "model"
+# STATE_ARTIFACT_FILE_NAME = "state"
 
 # make the IDE happy: mx.py does not explicitly import autograd
 mx.autograd = autograd
 
 
-def check_loss_finite(val: float) -> None:
-    if not np.isfinite(val):
-        raise GluonTSDataError(
-            "Encountered invalid loss value! Try reducing the learning rate "
-            "or try a different likelihood."
-        )
+# def check_loss_finite(val: float) -> None:
+#     if not np.isfinite(val):
+#         raise GluonTSDataError(
+#             "Encountered invalid loss value! Try reducing the learning rate "
+#             "or try a different likelihood."
+#         )
+#
+#
+# def loss_value(loss: mx.metric.CompositeEvalMetric) -> float:
+#     names, metrics = loss.get()
+#     return metrics[names.index("loss")]
+#     # return loss.get_name_value()[0][1]
 
 
-def loss_value(loss: mx.metric.Loss) -> float:
-    return loss.get_name_value()[0][1]
-
-
-class BestEpochInfo(NamedTuple):
-    params_path: str
-    epoch_no: int
-    metric_value: float
+# class BestEpochInfo(NamedTuple):
+#     params_path: str
+#     epoch_no: int
+#     metric_value: float
 
 
 class Trainer:
@@ -109,16 +111,18 @@ class Trainer:
         batch_size: int = 32,
         num_batches_per_epoch: int = 50,
         verbose: int = 1,
-        metrics=None,
-        callbacks=None,
+        metrics: Optional[list] = None,
+        callbacks: Optional[list] = None,
         learning_rate: float = 1e-3,
-        learning_rate_decay_factor: float = 0.5,
-        patience: int = 10,
-        minimum_learning_rate: float = 5e-5,
+        # learning_rate_decay_factor: float = 0.5,
+        # patience: int = 10,
+        # minimum_learning_rate: float = 5e-5,
         clip_gradient: float = 10.0,
         weight_decay: float = 1e-8,
         init: Union[str, mx.initializer.Initializer] = "xavier",
         hybridize: bool = True,
+        optimizer: Optional[mx.optimizer.Optimizer] = None,
+        hierarchy_penalty: Optional[float] = None,
     ) -> None:
 
         assert (
@@ -131,13 +135,13 @@ class Trainer:
         assert (
             0 < learning_rate < float("inf")
         ), "The value of `learning_rate` should be > 0"
-        assert (
-            0 <= learning_rate_decay_factor < 1
-        ), "The value of `learning_rate_decay_factor` should be in the [0, 1) range"
-        assert 0 <= patience, "The value of `patience` should be >= 0"
-        assert (
-            0 <= minimum_learning_rate
-        ), "The value of `minimum_learning_rate` should be >= 0"
+        # assert (
+        #     0 <= learning_rate_decay_factor < 1
+        # ), "The value of `learning_rate_decay_factor` should be in the [0, 1) range"
+        # assert 0 <= patience, "The value of `patience` should be >= 0"
+        # assert (
+        #     0 <= minimum_learning_rate
+        # ), "The value of `minimum_learning_rate` should be >= 0"
         assert 0 < clip_gradient, "The value of `clip_gradient` should be > 0"
         assert 0 <= weight_decay, "The value of `weight_decay` should be => 0"
 
@@ -145,9 +149,9 @@ class Trainer:
         self.batch_size = batch_size
         self.num_batches_per_epoch = num_batches_per_epoch
         self.learning_rate = learning_rate
-        self.learning_rate_decay_factor = learning_rate_decay_factor
-        self.patience = patience
-        self.minimum_learning_rate = minimum_learning_rate
+        # self.learning_rate_decay_factor = learning_rate_decay_factor
+        # self.patience = patience
+        # self.minimum_learning_rate = minimum_learning_rate
         self.clip_gradient = clip_gradient
         self.weight_decay = weight_decay
         self.init = init
@@ -157,20 +161,22 @@ class Trainer:
 
         self.verbose = verbose
         self.metrics = mx.metric.CompositeEvalMetric((metrics or []) + [mx.metric.Loss()])
+        self.hierarchy_penalty = hierarchy_penalty
+
+        if optimizer is None:
+            self.optimizer = mx.optimizer.Adam(
+                learning_rate=self.learning_rate,
+                wd=self.weight_decay,
+                clip_gradient=self.clip_gradient,
+            )
+        else:
+            self.optimizer = optimizer
 
         # Initialize callbacks
         callbacks = callbacks or []
-        callbacks.append(cb.History())
-        self.callbacks = cb.CallbackFactory(callbacks, verbose=self.verbose)
-        self.callbacks.set_params(
-            {
-                'epochs': self.epochs,
-                'batch_size': self.batch_size,
-                'steps': self.num_batches_per_epoch,
-                'verbose': self.verbose,
-                'metrics': self.metrics,
-            }
-        )
+        self.history = cb.History()
+        callbacks.append(self.history)
+        self.callbacks = cb.CallbackFactory(callbacks, verbose=verbose)
 
     def set_halt(self, signum: int, stack_frame: Any) -> None:
         logging.info("Received signal: {}".format(signum))
@@ -189,173 +195,135 @@ class Trainer:
         net: nn.HybridBlock,
         input_names: List[str],
         train_iter: TrainDataLoader,
-        predict_iter: Optional[InferenceDataLoader] = None,
-    ) -> None:  # TODO: we may want to return some training information here
+        predict_iter: Optional[list] = None,
+    ) -> Callback:  # TODO: we may want to return some training information here
         self.halt = False
 
-        self.callbacks.set_model(net)
-        self.callbacks.on_train_begin()
+        net.initialize(ctx=self.ctx, init=self.init)
 
-        with tempfile.TemporaryDirectory(
-            prefix="gluonts-trainer-temp-"
-        ) as gluonts_temp:
+        # from supplymodels import utils
+        # states = utils.read_json('s3://dibgerge/experiments-6/JL-TI-R/model-36/states.json')
 
-            def base_path() -> str:
-                return os.path.join(
-                    gluonts_temp,
-                    "{}_{}".format(STATE_ARTIFACT_FILE_NAME, uuid.uuid4()),
-                )
+        with HybridContext(
+            net=net,
+            hybridize=self.hybridize,
+            static_alloc=True,
+            static_shape=True,
+        ):
+            batch_size = train_iter.batch_size
 
-            # logging.info("Start model training")
-            net.initialize(ctx=self.ctx, init=self.init)
+            trainer = mx.gluon.Trainer(
+                net.collect_params(),
+                optimizer=self.optimizer,
+                kvstore="device",  # FIXME: initialize properly
+            )
 
-            with HybridContext(
-                net=net,
-                hybridize=self.hybridize,
-                static_alloc=True,
-                static_shape=True,
-            ):
-                batch_size = train_iter.batch_size
-                # epoch_loss = mx.metric.Loss()
+            self.callbacks.initialize(
+                net,
+                trainer,
+                self.epochs,
+                self.metrics,
+                self.num_batches_per_epoch,
+                self.batch_size
+            )
+            self.callbacks.on_train_begin()
 
-                best_epoch_info = BestEpochInfo(
-                    params_path="%s-%s.params" % (base_path(), "init"),
-                    epoch_no=-1,
-                    metric_value=np.Inf,
-                )
+            for epoch_no in range(1, 1 + self.epochs):
+                self.callbacks.on_epoch_begin(epoch_no)
 
-                lr_scheduler = lrs.MetricAttentiveScheduler(
-                    objective="min",
-                    patience=self.patience,
-                    decay_factor=self.learning_rate_decay_factor,
-                    min_lr=self.minimum_learning_rate,
-                )
+                if hasattr(net, 'halt') and net.halt:
+                    # logging.info(
+                    #     f"Epoch[{epoch_no}] Interrupting training"
+                    # )
+                    break
 
-                optimizer = mx.optimizer.Adam(
-                    learning_rate=self.learning_rate,
-                    lr_scheduler=lr_scheduler,
-                    wd=self.weight_decay,
-                    clip_gradient=self.clip_gradient,
-                )
+                self.metrics.reset()
 
-                trainer = mx.gluon.Trainer(
-                    net.collect_params(),
-                    optimizer=optimizer,
-                    kvstore="device",  # FIXME: initialize properly
-                )
-
-                for epoch_no in range(self.epochs):
-                    self.callbacks.on_epoch_begin(epoch_no)
-
-                    if self.halt:
-                        logging.info(
-                            f"Epoch[{epoch_no}] Interrupting training"
-                        )
+                for batch_no, data_entry in enumerate(train_iter, start=1):
+                    self.callbacks.on_batch_begin(batch_no)
+                    if hasattr(net, 'halt') and net.halt:
                         break
 
-                    curr_lr = trainer.learning_rate
-                    # logging.info(
-                    #     f"Epoch[{epoch_no}] Learning rate is {curr_lr}"
-                    # )
+                    inputs = [data_entry[k] for k in input_names]
 
-                    # mark epoch start time
-                    tic = time.time()
+                    with mx.autograd.record():
+                        output = net(*inputs)
 
-                    self.metrics.reset()
+                        # network can returns several outputs, the first being always the loss
+                        # when having multiple outputs, the forward returns a list in
+                        # the case of hybrid and a tuple otherwise
+                        # we may wrap network outputs in the future to avoid this type check
+                        if isinstance(output, (list, tuple)):
+                            loss = output[0]
+                        else:
+                            loss = output
 
-                    # with tqdm(train_iter) as it:
-                    it = train_iter
-                    for batch_no, data_entry in enumerate(it, start=1):
-                        self.callbacks.on_batch_begin(batch_no)
-                        if self.halt:
-                            break
+                        # Add hierarchical penalty here is specified
+                        if predict_iter is not None and self.hierarchy_penalty is not None:
+                            buffer = BatchBuffer(
+                                len(predict_iter),
+                                self.ctx,
+                                train_iter.dtype
+                            )
 
-                        inputs = [data_entry[k] for k in input_names]
+                            # Id's of selected training data in current batch
+                            ids = data_entry['source'][1]
+                            hierarchy = {}
+                            buffer_idx = 0
+                            for i, id_ in enumerate(ids):
+                                parent = predict_iter[id_ - 1]
+                                buffer.add(parent)
+                                hierarchy[buffer_idx] = []
+                                parent_idx = buffer_idx
+                                buffer_idx += 1
 
-                        with mx.autograd.record():
+                                for v in parent['children'].values():
+                                    curr_list = []
+                                    for j, vi in enumerate(v):
+                                        buffer.add(predict_iter[vi])
+                                        curr_list.append(buffer_idx)
+                                        buffer_idx += 1
+                                    hierarchy[parent_idx].append(curr_list)
+
+                            batch = buffer.next_batch()
+                            inputs = [
+                                batch[k] if batch[k].shape[1] > 0
+                                else None for k in input_names
+                            ]
                             output = net(*inputs)
 
-                            # network can returns several outputs, the first being always the loss
-                            # when having multiple outputs, the forward returns a list in the case of hybrid and a
-                            # tuple otherwise
-                            # we may wrap network outputs in the future to avoid this type check
-                            if isinstance(output, (list, tuple)):
-                                loss = output[0]
-                            else:
-                                loss = output
+                            penalty = mx.nd.zeros(shape=output.shape[1:], ctx=self.ctx)
+                            tot = 0
+                            for parent_idx, h in hierarchy.items():
+                                parent = output[parent_idx]
+                                for kid in h:
+                                    kids_sum = mx.nd.zeros(shape=output.shape[1:], ctx=self.ctx)
+                                    tot += 1
+                                    for kid_idx in kid:
+                                        kids_sum = kids_sum + output[kid_idx]
 
-                        # print(mu)
-                        loss.backward()
-                        trainer.step(batch_size)
-                        self.metrics.update(labels=data_entry["future_target"], preds=loss)
-                        # it.set_postfix(
-                        #     ordered_dict={
-                        #         "avg_epoch_loss": loss_value(epoch_loss)
-                        #     },
-                        #     refresh=False,
-                        # )
-                        # print out parameters of the network at the first pass
-                        if batch_no == 1 and epoch_no == 0:
-                            net_name = type(net).__name__
-                            num_model_param = self.count_model_params(net)
-                            # logging.info(
-                            #     f"Number of parameters in {net_name}: {num_model_param}"
-                            # )
+                                    penalty = penalty + (parent - kids_sum)**2
+                            penalty = penalty / tot
+                            loss = loss.mean() + self.hierarchy_penalty * penalty.mean()
+                            step = 1
+                        else:
+                            step = batch_size
 
-                        self.callbacks.on_batch_end(batch_no)
+                    loss.backward()
+                    trainer.step(step)
+                    self.metrics.update(labels=None, preds=loss)
 
-                    # mark epoch end time and log time cost of current epoch
-                    toc = time.time()
-                    # logging.info(
-                    #     "Epoch[%d] Elapsed time %.3f seconds",
-                    #     epoch_no,
-                    #     (toc - tic),
-                    # )
-                    self.callbacks.on_epoch_end(epoch_no)
-                    print(self.callbacks.callbacks[-1].history)
-                    # check and log epoch loss
-                    # check_loss_finite(loss_value(epoch_loss))
-                    # logging.info(
-                    #     "Epoch[%d] Evaluation metric '%s'=%f",
-                    #     epoch_no,
-                    #     "epoch_loss",
-                    #     loss_value(epoch_loss),
-                    # )
+                    # print out parameters of the network at the first pass
+                    if batch_no == 2 and epoch_no == 1:
+                        net_name = type(net).__name__
+                        num_model_param = self.count_model_params(net)
+                        logging.info(
+                            f"Number of parameters in {net_name}: {num_model_param}"
+                        )
 
-                    # lr_scheduler.step(loss_value(epoch_loss))
-                    #
-                    # if loss_value(epoch_loss) < best_epoch_info.metric_value:
-                    #     best_epoch_info = BestEpochInfo(
-                    #         params_path="%s-%04d.params"
-                    #         % (base_path(), epoch_no),
-                    #         epoch_no=epoch_no,
-                    #         metric_value=loss_value(epoch_loss),
-                    #     )
-                    #     net.save_parameters(
-                    #         best_epoch_info.params_path
-                    #     )  # TODO: handle possible exception
+                    self.callbacks.on_batch_end(batch_no)
 
-                    # if not trainer.learning_rate == curr_lr:
-                    #     # logging.info(
-                    #     #     f"Loading parameters from best epoch "
-                    #     #     f"({best_epoch_info.epoch_no})"
-                    #     # )
-                    #     net.load_parameters(
-                    #         best_epoch_info.params_path, self.ctx
-                    #     )
-                #
-                # logging.info(
-                #     f"Loading parameters from best epoch "
-                #     f"({best_epoch_info.epoch_no})"
-                # )
-                # net.load_parameters(best_epoch_info.params_path, self.ctx)
+                self.callbacks.on_epoch_end(epoch_no)
 
-                # logging.info(
-                #     f"Final loss: {best_epoch_info.metric_value} "
-                #     f"(occurred at epoch {best_epoch_info.epoch_no})"
-                # )
-
-                # save net parameters
-                # net.save_parameters(best_epoch_info.params_path)
-                self.callbacks.on_train_end()
-                # logging.getLogger().info("End model training")
+            self.callbacks.on_train_end()
+            return self.history

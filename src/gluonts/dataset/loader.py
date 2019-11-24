@@ -146,7 +146,7 @@ class TrainDataLoader(DataLoader):
         num_batches_per_epoch: int,
         dtype: DType = np.float32,
         shuffle_for_training: bool = True,
-        num_batches_for_shuffling: int = 10,
+        num_batches_for_shuffling: int = 100,
     ) -> None:
         super().__init__(dataset, transform, batch_size, ctx, dtype)
         self.num_batches_per_epoch = num_batches_per_epoch

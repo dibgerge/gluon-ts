@@ -66,11 +66,12 @@ class Gaussian(Distribution):
     def log_prob(self, x: Tensor) -> Tensor:
         F = self.F
         mu, sigma = self.mu, self.sigma
-        return -1.0 * (
+        val = -1.0 * (
             F.log(sigma)
             + 0.5 * math.log(2 * math.pi)
             + 0.5 * F.square((x - mu) / sigma)
         )
+        return val
 
     @property
     def mean(self) -> Tensor:

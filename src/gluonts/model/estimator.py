@@ -30,6 +30,7 @@ from gluonts.model.predictor import Predictor
 from gluonts.support.util import get_hybrid_forward_input_names
 from gluonts.trainer import Trainer
 from gluonts.transform import Transformation
+from gluonts.trainer.callbacks import Callback
 
 
 class Estimator:
@@ -105,6 +106,8 @@ class GluonEstimator(Estimator):
     def __init__(self, trainer: Trainer, dtype: DType = np.float32) -> None:
         self.trainer = trainer
         self.dtype = dtype
+        self.predict_net = None
+        self.train_net = None
 
     @classmethod
     def from_hyperparameters(cls, **hyperparameters) -> "GluonEstimator":
@@ -162,7 +165,7 @@ class GluonEstimator(Estimator):
         """
         raise NotImplementedError
 
-    def train_model(self, training_data: Dataset) -> TrainOutput:
+    def train_model(self, training_data: Dataset, predict_data=None) -> Callback:
         transformation = self.create_transformation()
 
         transformation.estimate(iter(training_data))
@@ -173,29 +176,32 @@ class GluonEstimator(Estimator):
             batch_size=self.trainer.batch_size,
             num_batches_per_epoch=self.trainer.num_batches_per_epoch,
             ctx=self.trainer.ctx,
-            dtype=self.dtype,
         )
 
         # ensure that the training network is created within the same MXNet
         # context as the one that will be used during training
         with self.trainer.ctx:
-            trained_net = self.create_training_network()
+            self.train_net = self.create_training_network()
 
-        self.trainer(
-            net=trained_net,
-            input_names=get_hybrid_forward_input_names(trained_net),
+        history = self.trainer(
+            net=self.train_net,
+            input_names=get_hybrid_forward_input_names(self.train_net),
             train_iter=training_data_loader,
+            predict_iter=predict_data,
         )
 
         with self.trainer.ctx:
+
             # ensure that the prediction network is created within the same MXNet
             # context as the one that was used during training
-            return TrainOutput(
-                transformation=transformation,
-                trained_net=trained_net,
-                predictor=self.create_predictor(transformation, trained_net),
-            )
+            self.predict_net = self.create_predictor(transformation, self.train_net)
+            # return TrainOutput(
+            #     transformation=transformation,
+            #     trained_net=trained_net,
+            #     predictor=,
+            # )
+        return history
 
-    def train(self, training_data: Dataset) -> Predictor:
+    def train(self, training_data: Dataset, predict_data=None) -> Callback:
 
-        return self.train_model(training_data).predictor
+        return self.train_model(training_data, predict_data)
