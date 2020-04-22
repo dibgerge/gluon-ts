@@ -134,6 +134,7 @@ class DeepAREstimator(GluonEstimator):
         lags_seq: Optional[List[int]] = None,
         time_features: Optional[List[TimeFeature]] = None,
         num_parallel_samples: int = 100,
+        n_forecast: Optional[int] = None,
         dtype: DType = np.float32,
         embedder: Optional[Any] = None,
     ) -> None:
@@ -199,6 +200,7 @@ class DeepAREstimator(GluonEstimator):
 
         self.num_parallel_samples = num_parallel_samples
         self.embedder = embedder
+        self.n_forecast = n_forecast or self.prediction_length
 
     def create_transformation(self) -> Transformation:
         remove_field_names = [FieldName.FEAT_DYNAMIC_CAT]
@@ -231,6 +233,11 @@ class DeepAREstimator(GluonEstimator):
                 ),
                 AsNumpyArray(
                     field=FieldName.FEAT_STATIC_REAL,
+                    expected_ndim=1,
+                    dtype=self.dtype,
+                ),
+                AsNumpyArray(
+                    field='weight',
                     expected_ndim=1,
                     dtype=self.dtype,
                 ),
@@ -321,6 +328,7 @@ class DeepAREstimator(GluonEstimator):
             scaling=self.scaling,
             dtype=self.dtype,
             embedder=self.embedder,
+            n_forecast=self.n_forecast
         )
 
         copy_parameters(trained_network, prediction_network)
@@ -330,7 +338,7 @@ class DeepAREstimator(GluonEstimator):
             prediction_net=prediction_network,
             batch_size=self.trainer.batch_size,
             freq=self.freq,
-            prediction_length=self.prediction_length,
+            prediction_length=self.n_forecast,
             ctx=self.trainer.ctx,
             dtype=self.dtype,
         )

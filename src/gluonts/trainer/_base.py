@@ -247,6 +247,7 @@ class Trainer:
                     inputs = [data_entry[k] for k in input_names]
 
                     with mx.autograd.record():
+                        print(inputs)
                         output = net(*inputs)
 
                         # network can returns several outputs, the first being always the loss

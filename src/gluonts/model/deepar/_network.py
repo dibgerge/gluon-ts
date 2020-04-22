@@ -362,6 +362,7 @@ class DeepARTrainingNetwork(DeepARNetwork):
         future_time_feat: Tensor,
         future_target: Tensor,
         future_observed_values: Tensor,
+        weight: Tensor,
     ) -> Tensor:
         """
         Computes the loss for training DeepAR, all inputs tensors representing
@@ -378,6 +379,7 @@ class DeepARTrainingNetwork(DeepARNetwork):
         future_time_feat : (batch_size, prediction_length, num_features)
         future_target : (batch_size, prediction_length, *target_shape)
         future_observed_values : (batch_size, prediction_length, *target_shape)
+        weight: (batch_size,)
 
         Returns loss with shape (batch_size, context + prediction_length, 1)
         -------
@@ -424,6 +426,7 @@ class DeepARTrainingNetwork(DeepARNetwork):
 
             # (batch_size, seq_len)
             loss = distr.loss(target)
+            loss = F.broadcast_mul(loss, weight)
 
             # (batch_size, seq_len, *target_shape)
             observed_values = F.concat(
@@ -545,9 +548,15 @@ class DeepARTrainingNetwork(DeepARNetwork):
 
 class DeepARPredictionNetwork(DeepARNetwork):
     @validated()
-    def __init__(self, num_parallel_samples: int = 100, **kwargs) -> None:
+    def __init__(
+            self,
+            num_parallel_samples: int = 100,
+            n_forecast: Optional[int] = None,
+            **kwargs
+    ) -> None:
         super().__init__(**kwargs)
         self.num_parallel_samples = num_parallel_samples
+        self.n_forecast = n_forecast or self.prediction_length
 
         # for decoding the lags are shifted by one, at the first time-step
         # of the decoder a lag of one corresponds to the last target value
@@ -607,7 +616,7 @@ class DeepARPredictionNetwork(DeepARNetwork):
         future_samples = []
 
         # for each future time-units we draw new samples for this time-unit and update the state
-        for k in range(self.prediction_length):
+        for k in range(self.n_forecast):
             # (batch_size * num_samples, 1, *target_shape, num_lags)
             lags = self.get_lagged_subsequences(
                 F=F,
